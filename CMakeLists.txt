@@ -50,8 +50,18 @@ add_compile_definitions(
 # Off by default: the client checks MPQ file MD5s (signaturefile) and GlueXML/FrameXML/AddOn .toc.sig files like the
 # original. ON accepts unsigned or modified game data and interface files.
 option(WOWDECOMP_DISABLE_SIGNATURE_CHECKS "Skip MPQ file signature and .toc signature checks" OFF)
+# Custom: DebugLog output (OutputDebugString) in optimized builds, for diagnosing with a debugger attached
+option(WOWDECOMP_DEBUG_LOG "Keep DebugLog output in optimized builds" OFF)
+if (WOWDECOMP_DEBUG_LOG)
+    add_compile_definitions(WOWDECOMP_DEBUG_LOG=1)
+endif ()
 if (WOWDECOMP_DISABLE_SIGNATURE_CHECKS)
     add_compile_definitions(DISABLE_SIGNATURE_CHECKS=1)
+endif ()
+# Custom: retail race models and customization (Kalibro's Engine/Source/Retail, docs/retail-races-plan.md)
+option(WOWDECOMP_RETAIL_ASSETS "Read Retail assets from files, local CASC or Blizzard's CDN" OFF)
+if (WOWDECOMP_RETAIL_ASSETS)
+    include(cmake/RetailAssets.cmake)
 endif ()
 
 # Third-party code is linked, not decompiled, for now.

@@ -9,6 +9,7 @@
 #include "Engine/Source/lua-5.1/src/lua.h"
 #include "Engine/Source/Storm/H/storm.h"
 #include "WoW/Common/ComponentCore/CharacterComponent.h"
+#include "WoW/Common/ComponentCore/RetailRace.h"
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/DB/Rec/ChrClassesRec.h"
 #include "WoW/Source/DB/Rec/ChrRacesRec.h"
@@ -274,13 +275,14 @@ static int32_t GetShapeshiftDisplay(int32_t form, const CharacterPreferences& pr
     return model ? model : formRec->m_creatureDisplayID[0];
 }
 
-// Custom: SetModelCreatureDisplay("frameName", displayID) shows a creature display (model plus its skins) in a Model
-// frame, lit by the frame's own light and framed whole by a camera aimed at its bounding sphere; 0 clears the frame.
-// Used by the druid form preview. (A plain Model frame draws only in its own rectangle; a ModelFFX would clear the
-// whole screen.)
+// Custom: SetModelCreatureDisplay("frameName", displayID[, zoom]) shows a creature display (model plus its skins) in a
+// Model frame, lit by the frame's own light and framed whole by a camera aimed at its bounding sphere; 0 clears the
+// frame. zoom (default 1) brings the camera closer: the model's size on screen follows the frame's diagonal divided by
+// the camera distance, so a frame shrunk by some factor keeps the model's size with zoom = 1 / factor. Used by the druid
+// form preview. (A plain Model frame draws only in its own rectangle; a ModelFFX would clear the whole screen.)
 static int32_t Script_SetModelCreatureDisplay(lua_State* L) {
     if (!lua_isstring(L, 1) || !lua_isnumber(L, 2)) {
-        luaL_error(L, "Usage: SetModelCreatureDisplay(\"frameName\", displayID)");
+        luaL_error(L, "Usage: SetModelCreatureDisplay(\"frameName\", displayID[, zoom])");
         return 0;
     }
 
@@ -324,6 +326,12 @@ static int32_t Script_SetModelCreatureDisplay(lua_State* L) {
     // Like CGCharacterModelBase::ConfigureCamera's fallback, scaled to the model: about 3.4 radii in front, a little above (closer than the paperdoll framing, so the form fills the preview)
     CAaSphere sphere = model->GetBoundingSphere();
     float radius = sphere.r > 0.1f ? sphere.r : 1.0f;
+    float zoom = lua_isnumber(L, 3) ? static_cast<float>(lua_tonumber(L, 3)) : 1.0f;
+
+    if (zoom > 0.1f) {
+        radius /= zoom;
+    }
+
     CCamera* camera = CameraCreate();
     CameraSetFloat(camera, 4, 0.5f);
     CameraSetCoord(camera, 8, sphere.c, 0);
@@ -396,6 +404,18 @@ static int32_t Script_IsViewingAlteredForm(lua_State* L) {
 static int32_t Script_SetViewingAlteredForm(lua_State* L) {
     CCharacterCreation::SetViewingAlteredForm(lua_toboolean(L, 1));
     return 0;
+}
+
+// Custom: IsMaleOnlyRace() for the selected race: true when its ChrRaces female display uses the male display's
+// model, i.e. the race has no female model. The server (WHE core patch) creates such characters male, and the
+// character creation UI hides the female button for them.
+static int32_t Script_IsMaleOnlyRace(lua_State* L) {
+    ChrRacesRec* raceRec = CCharacterCreation::m_character ? g_chrRacesDB.GetRecord(CCharacterCreation::m_character->m_data.m_preferences.m_raceID) : nullptr;
+    CreatureDisplayInfoRec* maleDisplay = raceRec ? g_creatureDisplayInfoDB.GetRecord(raceRec->m_maleDisplayID) : nullptr;
+    CreatureDisplayInfoRec* femaleDisplay = raceRec ? g_creatureDisplayInfoDB.GetRecord(raceRec->m_femaleDisplayID) : nullptr;
+
+    lua_pushboolean(L, maleDisplay && femaleDisplay && maleDisplay->m_modelID == femaleDisplay->m_modelID);
+    return 1;
 }
 
 // VERIFY: 262c3be3 manual
@@ -479,6 +499,9 @@ static int32_t Script_GetFactionForRace(lua_State* L) {
 // OFFSET: 0x004E0830
 static int32_t Script_GetAvailableClasses(lua_State* L) {
     int32_t count = g_chrClassesDB.m_numRecords;
+    // Custom: room for 3 values per entry; a C function only gets LUA_MINSTACK (20) slots, and with the custom races
+    // this list overran the Lua stack, corrupting the heap
+    lua_checkstack(L, 3 * count);
 
     for (int32_t i = 0; i < count; i++) {
         ChrClassesRec* classRec = i >= 0 && i < g_chrClassesDB.m_numRecords ? &g_chrClassesDB.m_records[i] : nullptr;
@@ -575,9 +598,45 @@ static int32_t Script_GetSelectedClass(lua_State* L) {
     return 6;
 }
 
+// Custom: RetailLoadExisting(): when customizing an existing character of a retail race, start from its saved look
+static int32_t Script_RetailLoadExisting(lua_State* L) {
+    int32_t index = CCharacterCreation::m_existingCharacterIndex;
+
+    if (index >= 0 && index < static_cast<int32_t>(CCharacterSelection::s_characterList.Count())) {
+        RetailRaceApplyLookTo(CCharacterCreation::m_character, CCharacterSelection::s_characterList[index].m_characterInfo.m_guid.m_guid, true);
+    }
+
+    return 0;
+}
+
 // VERIFY: 8c236267 manual
 // OFFSET: 0x004E0B50
 static int32_t Script_CycleCharCustomization(lua_State* L) {
+    // Custom: GlueXML reaches the retail race options and the creator camera through string commands (Kalibro's EA_*
+    // contract): EA_RETAIL, EA_COUNT, EA_GET, EA_SET, EA_CYCLE, EA_CHOICES, EA_CHOICE_NAME, EA_RANDOM, EA_PREVIEW_*,
+    // EA_FORM_*, EA_ZOOM, EA_PAN, EA_PAN_RESET. Unknown commands return nothing.
+    if (lua_type(L, 1) == LUA_TSTRING && !lua_isnumber(L, 1)) {
+        const char* command = lua_tolstring(L, 1, nullptr);
+
+        if (!SStrCmp(command, "EA_ZOOM", STORM_MAX_STR) && lua_isnumber(L, 2)) {
+            CCharacterCreation::ZoomCamera(static_cast<float>(lua_tonumber(L, 2)));
+            return 0;
+        }
+
+        if (!SStrCmp(command, "EA_PAN", STORM_MAX_STR) && lua_isnumber(L, 2) && lua_isnumber(L, 3)) {
+            CCharacterCreation::PanCamera(static_cast<float>(lua_tonumber(L, 2)), static_cast<float>(lua_tonumber(L, 3)));
+            return 0;
+        }
+
+        if (!SStrCmp(command, "EA_PAN_RESET", STORM_MAX_STR)) {
+            CCharacterCreation::ResetPanCamera();
+            return 0;
+        }
+
+        int32_t results = RetailRaceCycleCommand(L, CCharacterCreation::m_character, command);
+        return results < 0 ? 0 : results;
+    }
+
     if (!lua_isnumber(L, 1) || !lua_isnumber(L, 2)) {
         luaL_error(L, "Usage: CycleCharCustomization(index, delta)");
         return 0;
@@ -674,7 +733,12 @@ static int32_t Script_GetCreateBackgroundModel(lua_State* L) {
 
         if (classRec) {
             lua_pushstring(L, classRec->m_filename);
-            return 1;
+
+            // Custom: also return the race's file string, so the glue scripts can pick a death knight scene that
+            // frames tall races (the class scene is shared by every race)
+            ChrRacesRec* raceRec = g_chrRacesDB.GetRecord(CCharacterCreation::m_character->m_data.m_preferences.m_raceID);
+            lua_pushstring(L, raceRec ? raceRec->m_clientFileString : "");
+            return 2;
         }
     } else {
         uint32_t raceID = CCharacterCreation::m_character->m_data.m_preferences.m_raceID;
@@ -701,6 +765,9 @@ static int32_t Script_GetCreateBackgroundModel(lua_State* L) {
 // OFFSET: 0x004E1880
 static int32_t Script_GetAvailableRaces(lua_State* L) {
     uint32_t count = CCharacterCreation::m_races.Count();
+    // Custom: room for 3 values per entry; a C function only gets LUA_MINSTACK (20) slots, and with the custom races
+    // this list overran the Lua stack, corrupting the heap
+    lua_checkstack(L, static_cast<int32_t>(3 * count));
 
     for (uint32_t i = 0; i < count; i++) {
         lua_pushstring(L, CGUnit_C::GetDisplayRaceNameFromRecord(g_chrRacesDB.GetRecord(CCharacterCreation::m_races.m_data[i]), CCharacterCreation::m_character->m_data.m_preferences.m_sexID, nullptr));
@@ -720,6 +787,9 @@ static int32_t Script_GetAvailableRaces(lua_State* L) {
 // OFFSET: 0x004E19A0
 static int32_t Script_GetClassesForRace(lua_State* L) {
     uint32_t count = CCharacterCreation::m_classes.Count();
+    // Custom: room for 3 values per entry; a C function only gets LUA_MINSTACK (20) slots, and with the custom races
+    // this list overran the Lua stack, corrupting the heap
+    lua_checkstack(L, static_cast<int32_t>(3 * count));
 
     for (uint32_t i = 0; i < count; i++) {
         ChrClassesRec* classRec = i < CCharacterCreation::m_classes.Count() ? CCharacterCreation::m_classes.m_data[i] : nullptr;
@@ -769,6 +839,12 @@ static int32_t Script_SetSelectedClass(lua_State* L) {
 
     int32_t index = static_cast<int32_t>(lua_tonumber(L, 1)) - 1;
     ChrClassesRec* classRec = index >= 0 && index < g_chrClassesDB.m_numRecords ? &g_chrClassesDB.m_records[index] : nullptr;
+
+    // Custom: an out of range index used to dereference null
+    if (!classRec) {
+        return 0;
+    }
+
     CCharacterCreation::SetSelectedClass(classRec->m_id);
     return 0;
 }
@@ -865,7 +941,9 @@ static FrameScript_Method s_scriptFunctions[] = {
     { "SetModelCreatureDisplay", &Script_SetModelCreatureDisplay },
     { "IsViewingAlteredForm", &Script_IsViewingAlteredForm },
     { "SetViewingAlteredForm", &Script_SetViewingAlteredForm },
+    { "IsMaleOnlyRace", &Script_IsMaleOnlyRace },
     { "CycleCharCustomization", &Script_CycleCharCustomization },
+    { "RetailLoadExisting", &Script_RetailLoadExisting },
     { "RandomizeCharCustomization", &Script_RandomizeCharCustomization },
     { "GetCharacterCreateFacing", &Script_GetCharacterCreateFacing },
     { "SetCharacterCreateFacing", &Script_SetCharacterCreateFacing },

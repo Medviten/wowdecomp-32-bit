@@ -1,9 +1,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 #include <malloc.h>
 #include <new>
+#include <limits>
 #include <typeinfo>
+#include <unordered_map>
+#include <vector>
 #include "Engine/Source/Model2/M2Shared.h"
 #include "Engine/Source/Base/Handle.h"
 #include "Engine/Source/Base/SIMD.h"
@@ -24,6 +28,17 @@
 #include "Engine/Source/Storm/H/storm.h"
 #include "Engine/Source/Tempest/CImVector.h"
 #include "Engine/Source/Os/OsMemory.h"
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+#include "Engine/Source/Retail/CascSource.h"
+#include "Engine/Source/Retail/RetailShader.h"
+#include "Engine/Source/Retail/RetailModel.h"
+#endif
+
+// Out of range / 0xFFFF coordinate combo indices (newer or converted models) read as coordinate set 0.
+static uint16_t SafeCoordCombo(const M2Data* data, uint32_t index) {
+    return index < data->m_textureCoordCombos.m_count ? data->m_textureCoordCombos[index] : 0;
+}
+
 
 // STATIC: 0x00A45644
 static const uint32_t s_skinProfileBoneCounts[4] = { 256, 64, 53, 21 };
@@ -42,6 +57,20 @@ static uint8_t* s_sequenceData;
 
 // STATIC: 0x00D4125C
 static uint32_t s_sequenceSize;
+
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+static uint8_t* s_sequenceBoneData;
+static uint8_t* s_sequenceAttachmentData;
+
+class SequenceDataScope {
+    uint8_t* saved;
+public:
+    explicit SequenceDataScope(uint8_t* payload) : saved(s_sequenceData) {
+        if (payload) s_sequenceData = payload;
+    }
+    ~SequenceDataScope() { s_sequenceData = saved; }
+};
+#endif
 
 // VERIFY: eb5cb8e9 auto
 // OFFSET: 0x00835950
@@ -337,8 +366,22 @@ static void ConvertTextureComboEntry(TextureComboList* list, int32_t adjust, uin
 // OFFSET: 0x008360A0
 int32_t CM2Shared::SetIndices() {
     if (!this->m_indexPool) {
-        this->m_indexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Index, GxPoolUsage_Dynamic, sizeof(uint16_t) * this->m_instances * this->m_skinData->m_indices.m_count, GxPoolHintBit_Unk1, this->m_fileNameWithoutPath);
-        this->m_indexBuf = g_theGxDevicePtr->BufCreate(this->m_indexPool, sizeof(uint16_t), this->m_instances * this->m_skinData->m_indices.m_count, 0);
+        uint64_t indexCount = 0;
+        for (uint32_t i = 0; i < this->m_skinData->m_skinSections.m_count; ++i) {
+            const M2SkinSection& section = this->m_skinData->m_skinSections[i];
+            const uint32_t start = M2WideIndexStart(&section, this->m_skinData->m_indices.m_count);
+            if (start > this->m_skinData->m_indices.m_count
+                || section.m_indexCount > this->m_skinData->m_indices.m_count - start) return 0;
+            indexCount += section.m_indexCount;
+        }
+        const uint32_t maxIndexCount = std::numeric_limits<uint32_t>::max() / sizeof(uint16_t);
+        if (!indexCount || !this->m_instances || indexCount > maxIndexCount / this->m_instances) return 0;
+
+        // Sections may share source triangles; the packed output still emits each section for every instance.
+        const uint32_t packedCount = static_cast<uint32_t>(indexCount * this->m_instances);
+        this->m_indexPool = g_theGxDevicePtr->PoolCreate(GxPoolTarget_Index, GxPoolUsage_Dynamic,
+            sizeof(uint16_t) * packedCount, GxPoolHintBit_Unk1, this->m_fileNameWithoutPath);
+        this->m_indexBuf = g_theGxDevicePtr->BufCreate(this->m_indexPool, sizeof(uint16_t), packedCount, 0);
 
         if (!this->m_indexPool || !this->m_indexBuf) {
             return 0;
@@ -357,7 +400,7 @@ int32_t CM2Shared::SetIndices() {
 
         for (uint32_t i = 0; i < this->m_skinData->m_skinSections.m_count; i++) {
             M2SkinSection* section = &this->m_skinSections[i];
-            uint32_t start = this->m_skinData->m_skinSections[i].m_indexStart;
+            uint32_t start = this->m_skinData->m_skinSections[i].IndexStart(); // Custom: index start including the level bits (see M2SkinSection)
             uint16_t offset = sharedVertices ? 0 : static_cast<uint16_t>(-section->m_vertexStart);
 
             for (uint32_t instance = 0; instance < this->m_instances; instance++) {
@@ -369,7 +412,7 @@ int32_t CM2Shared::SetIndices() {
                 offset += sharedVertices ? static_cast<uint16_t>(this->m_skinData->m_vertices.m_count) : section->m_vertexCount;
             }
 
-            section->m_indexStart = static_cast<uint16_t>(indexStart);
+            section->SetIndexStart(indexStart); // Custom: index start including the level bits (see M2SkinSection)
             indexStart += this->m_instances * section->m_indexCount;
         }
 
@@ -475,7 +518,15 @@ CShaderEffect* CM2Shared::GetEffect(uint32_t textureCount, uint16_t shader, uint
         } else {
             vertexShader = "Diffuse_T2";
 
-            if (!this->m_data->m_textureCoordCombos[textureCoordComboIndex]) {
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+            // Retail batches carry no coordinate combo (0xFFFF); their 0x4000 bit selects the second UV set.
+            if (Retail::SourceForPath(this->m_fileName).Handles(this->m_fileName)) {
+                if (!(shader & 0x4000)) {
+                    vertexShader = "Diffuse_T1";
+                }
+            } else
+#endif
+            if (!SafeCoordCombo(this->m_data, textureCoordComboIndex)) {
                 vertexShader = "Diffuse_T1";
             }
         }
@@ -643,8 +694,18 @@ void CM2Shared::SubstituteSimpleShaders() {
 
         M2Material* material = &this->m_data->m_materials[batch->m_materialIndex];
 
+        // Models from newer clients / converters can carry 0xFFFF ("none") or otherwise out of range
+        // combo indices. The stock client reads past the array and crashes; fall back to coordinate set 0.
+        auto coordCombo = [this](uint32_t index) -> uint16_t {
+            return index < this->m_data->m_textureCoordCombos.m_count ? this->m_data->m_textureCoordCombos[index] : 0;
+        };
+
+        auto combinerCombo = [this](uint32_t index) -> uint32_t {
+            return index < this->m_data->m_textureCombinerCombos.m_count ? this->m_data->m_textureCombinerCombos[index] : 0;
+        };
+
         if (!(this->m_data->m_flags & 8)) {
-            uint16_t coord = this->m_data->m_textureCoordCombos[batch->m_textureCoordComboIndex];
+            uint16_t coord = coordCombo(batch->m_textureCoordComboIndex);
             uint16_t op = material->m_blendMode != 0;
 
             if (coord > 2) {
@@ -662,13 +723,13 @@ void CM2Shared::SubstituteSimpleShaders() {
             batch->m_shader = 0;
 
             for (uint32_t j = 0; j < batch->m_textureCount; j++) {
-                uint32_t op = this->m_data->m_textureCombinerCombos[combiner + j];
+                uint32_t op = combinerCombo(combiner + j);
 
                 if (j == 0 && !material->m_blendMode) {
                     op = 0;
                 }
 
-                uint16_t coord = this->m_data->m_textureCoordCombos[batch->m_textureCoordComboIndex + j];
+                uint16_t coord = coordCombo(batch->m_textureCoordComboIndex + j);
                 ops[j] = op;
 
                 if (coord > 2) {
@@ -711,6 +772,45 @@ int32_t M2Init<M2Texture>(uint8_t* base, uint32_t size, const M2Data& data, M2Ar
 CShaderEffect* CM2Shared::GetEffect(M2Batch* batch) {
     CShaderEffect* effect;
 
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    if (Retail::SourceForPath(this->m_fileName).Handles(this->m_fileName) && batch->m_shader == 0x8010) {
+        const char* name = "Retail_Opaque_Reflection_Glow";
+        if (auto* existing = CShaderEffectManager::GetEffect(name)) return existing;
+        effect = CShaderEffectManager::CreateEffect(name);
+        effect->InitEffect("Diffuse_T1_Env", "Combiners_Opaque_Mod2xNA_Alpha");
+        for (unsigned i = 0; i < 16; ++i) {
+            auto* original = effect->m_pixelShaders[i];
+            std::vector<uint8_t> input(original->m_code.m_data, original->m_code.m_data + original->m_code.m_count), code;
+            std::string error;
+            if (!Retail::AddGlowLayer(input, code, error)) {
+                DebugLog("Retail material: %s", error.c_str()); return nullptr;
+            }
+            char shaderName[80]; std::snprintf(shaderName, sizeof(shaderName), "%s:%u", name, i);
+            auto* shader = g_theGxDevicePtr->m_shaderList[GxSh_Pixel].New(shaderName, 0, 0);
+            shader->m_refCount = 1; shader->m_target = GxSh_Pixel;
+            shader->m_code.SetCount(uint32_t(code.size()));
+            std::memcpy(shader->m_code.m_data, code.data(), code.size());
+            g_theGxDevicePtr->ShaderDestroy(effect->m_pixelShaders[i]);
+            effect->m_pixelShaders[i] = shader;
+        }
+        return effect;
+    }
+    if (Retail::SourceForPath(this->m_fileName).Handles(this->m_fileName) && batch->m_shader == 0x8012) {
+        const char* name = "Retail_Mod_Mod_T1_T2";
+        if (auto* existing = CShaderEffectManager::GetEffect(name)) return existing;
+        effect = CShaderEffectManager::CreateEffect(name);
+        effect->InitEffect("Diffuse_T1_T2", "Combiners_Mod_Mod");
+        return effect;
+    }
+    if (Retail::SourceForPath(this->m_fileName).Handles(this->m_fileName) && batch->m_shader == 0x8011) {
+        const char* name = "Retail_Mod_Mod2x_T1_T2";
+        if (auto* existing = CShaderEffectManager::GetEffect(name)) return existing;
+        effect = CShaderEffectManager::CreateEffect(name);
+        effect->InitEffect("Diffuse_T1_T2", "Combiners_Mod_Mod2x");
+        return effect;
+    }
+#endif
+
     if (!(batch->m_shader & 0x8000)) {
         effect = this->GetEffect(batch->m_textureCount, batch->m_shader, batch->m_textureCoordComboIndex);
     } else {
@@ -741,7 +841,9 @@ CShaderEffect* CM2Shared::GetEffect(M2Batch* batch) {
                 alphaOp = static_cast<EGxTexOp>(3);
                 break;
             default:
-                break;
+                // Custom: modern M2 models use shader IDs beyond the three the 3.3.5a client knows. Use the
+                // standard fallback below instead of dereferencing the missing shader names.
+                return this->GetEffect(batch->m_textureCount, 0x11, batch->m_textureCoordComboIndex);
         }
 
         char effectName[256];
@@ -1057,9 +1159,7 @@ void CM2Shared::SubstituteSpecializedShaders() {
                 [[fallthrough]];
             case 0:
                 if (!material->m_blendMode && batch->m_textureCount == 2 && (op == 4 || op == 6)) {
-                    uint16_t* coords = &this->m_data->m_textureCoordCombos[batch->m_textureCoordComboIndex];
-
-                    if (!coords[0] && coords[1] > 2) {
+                    if (!SafeCoordCombo(this->m_data, batch->m_textureCoordComboIndex) && SafeCoordCombo(this->m_data, batch->m_textureCoordComboIndex + 1) > 2) {
                         state0 = 1;
                     }
                 }
@@ -1072,7 +1172,7 @@ void CM2Shared::SubstituteSpecializedShaders() {
             case 0:
                 break;
             case 1:
-                if ((material->m_blendMode == 4 || material->m_blendMode == 6) && batch->m_textureCount == 1 && this->m_data->m_textureCoordCombos[batch->m_textureCoordComboIndex] > 2 && this->m_data->m_textureWeightCombos[base->m_textureWeightComboIndex] == this->m_data->m_textureWeightCombos[batch->m_textureWeightComboIndex]) {
+                if ((material->m_blendMode == 4 || material->m_blendMode == 6) && batch->m_textureCount == 1 && SafeCoordCombo(this->m_data, batch->m_textureCoordComboIndex) > 2 && this->m_data->m_textureWeightCombos[base->m_textureWeightComboIndex] == this->m_data->m_textureWeightCombos[batch->m_textureWeightComboIndex]) {
                     batch->m_shader = 0x8000;
                     combined = true;
                     base->m_shader = material->m_blendMode != 4 ? 0xE : 0x8002;
@@ -1099,7 +1199,7 @@ void CM2Shared::SubstituteSpecializedShaders() {
                 continue;
         }
 
-        if (!material->m_blendMode && batch->m_textureCount == 1 && !this->m_data->m_textureCoordCombos[batch->m_textureCoordComboIndex]) {
+        if (!material->m_blendMode && batch->m_textureCount == 1 && !SafeCoordCombo(this->m_data, batch->m_textureCoordComboIndex)) {
             state1 = 1;
         }
     }
@@ -1126,6 +1226,356 @@ void CM2Shared::SubstituteSpecializedShaders() {
             }
         }
     }
+}
+
+// Custom: no counterpart in the binary. Models from later clients (downported to version 264) can have skin sections
+// using more bones than one draw can upload: DrawBatch writes 3 vertex shader constants per bone from register 31 on,
+// and m_maxBones (from CM2Shared::Initialize, 64 on D3D9) is what fits. Larger sections overran the constant buffer
+// and corrupted memory. Such sections are split here, before InitializeSkinProfile, into pieces of at most m_maxBones
+// bones: each piece gets its own palette appended to the bone combo table, its own copies of the vertices it uses
+// (palette indices remapped) and its own triangles, and the batches drawing the section are repeated for every piece
+// (materials with several layers are repeated as a whole). Pieces keep the section id, so geosets still show and hide
+// as one. m_boneCountMax is capped too, as instanced draws upload m_boneCountMax bones. Models within budget are left
+// untouched.
+int32_t CM2Shared::SplitSkinSectionsToBoneBudget() {
+    M2SkinProfile* skin = this->m_skinData;
+    M2Data* data = this->m_data;
+    uint32_t maxBones = this->m_maxBones;
+
+    if (!maxBones) {
+        return 1;
+    }
+
+    if (skin->m_boneCountMax > maxBones) {
+        skin->m_boneCountMax = maxBones;
+    }
+
+    uint32_t sectionCount = skin->m_skinSections.m_count;
+    bool overBudget = false;
+
+    for (uint32_t i = 0; i < sectionCount; i++) {
+        if (skin->m_skinSections[i].m_boneCount > maxBones) {
+            overBudget = true;
+        }
+    }
+
+    if (!overBudget) {
+        return 1;
+    }
+
+    std::vector<uint16_t> vertices(skin->m_vertices.Data(), skin->m_vertices.Data() + skin->m_vertices.m_count);
+    std::vector<uint16_t> indices(skin->m_indices.Data(), skin->m_indices.Data() + skin->m_indices.m_count);
+    std::vector<ubyte4> bones(skin->m_bones.Data(), skin->m_bones.Data() + skin->m_bones.m_count);
+    std::vector<M2SkinSection> sections(skin->m_skinSections.Data(), skin->m_skinSections.Data() + sectionCount);
+    std::vector<uint16_t> combos(data->m_boneCombos.Data(), data->m_boneCombos.Data() + data->m_boneCombos.m_count);
+    std::vector<std::vector<uint16_t>> pieceSections(sectionCount); // sections added for pieces 2..n of a section
+
+    if (bones.size() < vertices.size()) {
+        return 0;
+    }
+
+    for (uint32_t s = 0; s < sectionCount; s++) {
+        const M2SkinSection section = sections[s];
+
+        if (section.m_boneCount <= maxBones) {
+            continue;
+        }
+
+        uint32_t indexStart = section.IndexStart();
+        uint32_t triangleCount = section.m_indexCount / 3;
+
+        if (indexStart + triangleCount * 3 > indices.size()) {
+            return 0;
+        }
+
+        // the bones (global ids) a skin vertex really uses
+        auto vertexBones = [&](uint16_t vertex, uint16_t* out) -> uint32_t {
+            uint32_t count = 0;
+            const ubyte4& local = bones[vertex];
+            const ubyte4& weights = data->m_vertices[vertices[vertex]].m_weights;
+
+            for (uint32_t k = 0; k < 4; k++) {
+                if (weights.b[k] && section.m_boneComboIndex + local.b[k] < combos.size()) {
+                    out[count++] = combos[section.m_boneComboIndex + local.b[k]];
+                }
+            }
+
+            return count;
+        };
+
+        // Models from later clients list a whole skeleton as a section's palette while its vertices use a few bones of
+        // it. When the bones really used fit, the palette is just compacted to them and the section's own vertices
+        // remapped in place (no copies), provided its triangles stay within its vertex range and no other section
+        // shares that range.
+        {
+            std::vector<uint16_t> used;
+            std::unordered_map<uint16_t, uint16_t> usedSlot;
+            bool inRange = true;
+
+            for (uint32_t i = 0; i < triangleCount * 3 && inRange; i++) {
+                uint16_t vertex = indices[indexStart + i];
+                uint16_t vertexBoneIds[4];
+
+                if (vertex < section.m_vertexStart || vertex >= section.m_vertexStart + section.m_vertexCount) {
+                    inRange = false;
+                    break;
+                }
+
+                uint32_t count = vertexBones(vertex, vertexBoneIds);
+
+                for (uint32_t b = 0; b < count; b++) {
+                    if (!usedSlot.count(vertexBoneIds[b])) {
+                        usedSlot[vertexBoneIds[b]] = static_cast<uint16_t>(used.size());
+                        used.push_back(vertexBoneIds[b]);
+                    }
+                }
+            }
+
+            for (uint32_t o = 0; o < sectionCount && inRange; o++) {
+                const M2SkinSection& other = skin->m_skinSections[o];
+
+                if (o != s && other.m_vertexCount && other.m_vertexStart < section.m_vertexStart + section.m_vertexCount && section.m_vertexStart < other.m_vertexStart + other.m_vertexCount) {
+                    inRange = false;
+                }
+            }
+
+            // keep one bone even when no weight is set: InitializeSkinProfile divides by the bone count
+            if (used.empty() && section.m_boneComboIndex < combos.size()) {
+                usedSlot[combos[section.m_boneComboIndex]] = 0;
+                used.push_back(combos[section.m_boneComboIndex]);
+            }
+
+            if (inRange && !used.empty() && used.size() <= maxBones && combos.size() + used.size() <= 0xFFFF) {
+                for (uint32_t v = section.m_vertexStart; v < static_cast<uint32_t>(section.m_vertexStart) + section.m_vertexCount; v++) {
+                    const ubyte4& weights = data->m_vertices[vertices[v]].m_weights;
+
+                    for (uint32_t b = 0; b < 4; b++) {
+                        uint32_t combo = section.m_boneComboIndex + bones[v].b[b];
+                        bones[v].b[b] = (weights.b[b] && combo < combos.size()) ? static_cast<uint8_t>(usedSlot[combos[combo]]) : 0;
+                    }
+                }
+
+                sections[s].m_boneCount = static_cast<uint16_t>(used.size());
+                sections[s].m_boneComboIndex = static_cast<uint16_t>(combos.size());
+                combos.insert(combos.end(), used.begin(), used.end());
+                continue;
+            }
+        }
+
+        std::vector<uint32_t> pieceTriangles;
+        std::vector<uint16_t> palette;
+        std::unordered_map<uint16_t, uint16_t> paletteSlot; // global bone -> palette index
+        uint32_t pieceCount = 0;
+
+        auto emitPiece = [&]() -> bool {
+            M2SkinSection piece = section;
+            std::unordered_map<uint16_t, uint16_t> remap; // old skin vertex -> new skin vertex
+
+            piece.m_vertexStart = static_cast<uint16_t>(vertices.size());
+            uint32_t pieceIndexStart = static_cast<uint32_t>(indices.size());
+
+            if (vertices.size() > 0xFFFF) {
+                return false;
+            }
+
+            for (uint32_t triangle : pieceTriangles) {
+                for (uint32_t k = 0; k < 3; k++) {
+                    uint16_t vertex = indices[indexStart + triangle * 3 + k];
+                    auto found = remap.find(vertex);
+
+                    if (found == remap.end()) {
+                        if (vertices.size() > 0xFFFF) {
+                            return false;
+                        }
+
+                        uint16_t newVertex = static_cast<uint16_t>(vertices.size());
+                        uint16_t modelVertex = vertices[vertex];
+                        ubyte4 local = bones[vertex];
+                        const ubyte4& weights = data->m_vertices[modelVertex].m_weights;
+
+                        for (uint32_t b = 0; b < 4; b++) {
+                            uint32_t combo = section.m_boneComboIndex + local.b[b];
+                            local.b[b] = (weights.b[b] && combo < combos.size()) ? static_cast<uint8_t>(paletteSlot[combos[combo]]) : 0;
+                        }
+
+                        vertices.push_back(modelVertex);
+                        bones.push_back(local);
+                        found = remap.emplace(vertex, newVertex).first;
+                    }
+
+                    indices.push_back(found->second);
+                }
+            }
+
+            if (combos.size() + palette.size() > 0xFFFF) {
+                return false;
+            }
+
+            piece.m_vertexCount = static_cast<uint16_t>(vertices.size() - piece.m_vertexStart);
+            piece.SetIndexStart(pieceIndexStart);
+            piece.m_indexCount = static_cast<uint16_t>(pieceTriangles.size() * 3);
+            piece.m_boneCount = static_cast<uint16_t>(palette.size());
+            piece.m_boneComboIndex = static_cast<uint16_t>(combos.size());
+            combos.insert(combos.end(), palette.begin(), palette.end());
+
+            if (pieceCount++ == 0) {
+                sections[s] = piece;
+            } else {
+                pieceSections[s].push_back(static_cast<uint16_t>(sections.size()));
+                sections.push_back(piece);
+            }
+
+            pieceTriangles.clear();
+            palette.clear();
+            paletteSlot.clear();
+            return true;
+        };
+
+        for (uint32_t triangle = 0; triangle < triangleCount; triangle++) {
+            uint16_t triangleBones[12];
+            uint32_t boneCount = 0;
+
+            for (uint32_t k = 0; k < 3; k++) {
+                boneCount += vertexBones(indices[indexStart + triangle * 3 + k], &triangleBones[boneCount]);
+            }
+
+            uint32_t added = 0;
+
+            for (uint32_t b = 0; b < boneCount; b++) {
+                bool known = paletteSlot.count(triangleBones[b]) != 0;
+
+                for (uint32_t c = 0; c < b && !known; c++) {
+                    known = triangleBones[c] == triangleBones[b];
+                }
+
+                added += known ? 0 : 1;
+            }
+
+            if (!pieceTriangles.empty() && palette.size() + added > maxBones) {
+                if (!emitPiece()) {
+                    return 0;
+                }
+            }
+
+            for (uint32_t b = 0; b < boneCount; b++) {
+                if (!paletteSlot.count(triangleBones[b])) {
+                    paletteSlot[triangleBones[b]] = static_cast<uint16_t>(palette.size());
+                    palette.push_back(triangleBones[b]);
+                }
+            }
+
+            pieceTriangles.push_back(triangle);
+        }
+
+        if (!pieceTriangles.empty() && !emitPiece()) {
+            return 0;
+        }
+    }
+
+    if (sections.size() > 0xFFFF) {
+        return 0;
+    }
+
+    // Batches: every material group (a batch and the layers after it, see m_materialLayer) drawing a split section
+    // is repeated, as a whole and right after itself, for each further piece, so layer offsets stay valid.
+    std::vector<M2Batch> batches;
+    uint32_t batchCount = skin->m_batches.m_count;
+
+    for (uint32_t i = 0; i < batchCount;) {
+        uint32_t end = i + 1;
+
+        while (end < batchCount && skin->m_batches[end].m_materialLayer && skin->m_batches[end].m_materialLayer == end - i) {
+            end++;
+        }
+
+        for (uint32_t j = i; j < end; j++) {
+            batches.push_back(skin->m_batches[j]);
+        }
+
+        uint16_t sectionIndex = skin->m_batches[i].m_skinSectionIndex;
+
+        if (sectionIndex < sectionCount) {
+            for (uint16_t pieceSection : pieceSections[sectionIndex]) {
+                for (uint32_t j = i; j < end; j++) {
+                    M2Batch batch = skin->m_batches[j];
+
+                    if (batch.m_skinSectionIndex == sectionIndex) {
+                        if (batch.m_geosetIndex == batch.m_skinSectionIndex) {
+                            batch.m_geosetIndex = pieceSection;
+                        }
+
+                        batch.m_skinSectionIndex = pieceSection;
+                    }
+
+                    batches.push_back(batch);
+                }
+            }
+        }
+
+        i = end;
+    }
+
+    if (batches.size() > 0xFFFF) {
+        return 0;
+    }
+
+    // The rebuilt arrays replace the ones in the skin file; M2Array keeps a 32-bit offset from itself, hence the
+    // allocation near the skin (and near the model data for the bone combos) on 64-bit.
+    auto align = [](size_t size) {
+        return (size + 15) & ~static_cast<size_t>(15);
+    };
+
+    size_t sectionsSize = align(sizeof(M2SkinSection) * sections.size());
+    size_t batchesSize = align(sizeof(M2Batch) * batches.size());
+    size_t bonesSize = align(sizeof(ubyte4) * bones.size());
+    size_t verticesSize = align(sizeof(uint16_t) * vertices.size());
+    size_t indicesSize = align(sizeof(uint16_t) * indices.size());
+    size_t total = sectionsSize + batchesSize + bonesSize + verticesSize + indicesSize;
+
+#if defined(WOWDECOMP_ARCH_64)
+    uint8_t* buffer = static_cast<uint8_t*>(OsAllocNear(skin, total));
+    uint16_t* comboBuffer = static_cast<uint16_t*>(OsAllocNear(data, sizeof(uint16_t) * combos.size()));
+#else
+    uint8_t* buffer = static_cast<uint8_t*>(SMemAlloc(total, __FILE__, __LINE__, 0));
+    uint16_t* comboBuffer = static_cast<uint16_t*>(SMemAlloc(sizeof(uint16_t) * combos.size(), __FILE__, __LINE__, 0));
+#endif
+
+    if (!buffer || !comboBuffer) {
+        return 0;
+    }
+
+    M2SkinSection* newSections = reinterpret_cast<M2SkinSection*>(buffer);
+    M2Batch* newBatches = reinterpret_cast<M2Batch*>(buffer + sectionsSize);
+    ubyte4* newBones = reinterpret_cast<ubyte4*>(buffer + sectionsSize + batchesSize);
+    uint16_t* newVertices = reinterpret_cast<uint16_t*>(buffer + sectionsSize + batchesSize + bonesSize);
+    uint16_t* newIndices = reinterpret_cast<uint16_t*>(buffer + sectionsSize + batchesSize + bonesSize + verticesSize);
+
+    memcpy(newSections, sections.data(), sizeof(M2SkinSection) * sections.size());
+    memcpy(newBatches, batches.data(), sizeof(M2Batch) * batches.size());
+    memcpy(newBones, bones.data(), sizeof(ubyte4) * bones.size());
+    memcpy(newVertices, vertices.data(), sizeof(uint16_t) * vertices.size());
+    memcpy(newIndices, indices.data(), sizeof(uint16_t) * indices.size());
+    memcpy(comboBuffer, combos.data(), sizeof(uint16_t) * combos.size());
+
+    skin->m_skinSections.Set(newSections);
+    skin->m_skinSections.m_count = static_cast<uint32_t>(sections.size());
+    skin->m_batches.Set(newBatches);
+    skin->m_batches.m_count = static_cast<uint32_t>(batches.size());
+    skin->m_bones.Set(newBones);
+    skin->m_bones.m_count = static_cast<uint32_t>(bones.size());
+    skin->m_vertices.Set(newVertices);
+    skin->m_vertices.m_count = static_cast<uint32_t>(vertices.size());
+    skin->m_indices.Set(newIndices);
+    skin->m_indices.m_count = static_cast<uint32_t>(indices.size());
+    data->m_boneCombos.Set(comboBuffer);
+    data->m_boneCombos.m_count = static_cast<uint32_t>(combos.size());
+
+    this->m_splitSkinBuffer = buffer;
+    this->m_splitBoneCombos = comboBuffer;
+
+    DebugLog("Model2: split skin sections of %s to %u bones: %u sections, %u batches", this->m_fileName, maxBones, static_cast<uint32_t>(sections.size()), static_cast<uint32_t>(batches.size()));
+
+    return 1;
 }
 
 // VERIFY: 6736c39f manual
@@ -1192,8 +1642,16 @@ int32_t CM2Shared::InitializeSkinProfile() {
         }
     }
 
-    this->SubstituteSimpleShaders();
-    this->SubstituteSpecializedShaders();
+    // Retail's adapter has already resolved shader IDs and texture table runs.
+    // Legacy specialization packs pairs into one word and cannot preserve a
+    // three-layer material, so it must not process these native batches again.
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    if (!Retail::SourceForPath(this->m_fileName).Handles(this->m_fileName))
+#endif
+    {
+        this->SubstituteSimpleShaders();
+        this->SubstituteSpecializedShaders();
+    }
 
     if (this->m_skinData->m_indices.m_count) {
         for (uint32_t i = 0; i < this->m_skinData->m_batches.m_count; i++) {
@@ -1332,12 +1790,19 @@ int32_t CM2Shared::FinishLoadingSkinProfile(uint32_t size) {
         return 0;
     }
 
+    // Custom: models from later clients can have sections with more bones than one draw can upload
+    if (!this->SplitSkinSectionsToBoneBudget()) {
+        DebugLog("Failed to split model skin sections: %s", this->m_fileName);
+        return 0;
+    }
+
     if (!this->InitializeSkinProfile()) {
         DebugLog("Failed to initialize model skin profile: %s", this->m_fileName);
         return 0;
     }
 
     this->m_flags |= 2;
+
 
     while (this->m_callbackList) {
         CM2Model* model = this->m_callbackList;
@@ -1352,6 +1817,9 @@ int32_t CM2Shared::FinishLoadingSkinProfile(uint32_t size) {
 // OFFSET: 0x008385A0
 template <>
 int32_t M2Init<M2CompBone>(uint8_t* base, uint32_t size, const M2Data& data, M2Array<M2CompBone>& array) {
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    SequenceDataScope source(s_sequenceBoneData);
+#endif
     if (s_sequenceIndex == 0xFFFFFFFF) {
         if (array.m_offset > size || array.m_offset + sizeof(M2CompBone) * array.m_count > size) {
             return 0;
@@ -1398,6 +1866,9 @@ int32_t M2Init<M2TextureTransform>(uint8_t* base, uint32_t size, const M2Data& d
 // OFFSET: 0x00839080
 template <>
 int32_t M2Init<M2Attachment>(uint8_t* base, uint32_t size, const M2Data& data, M2Array<M2Attachment>& array) {
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    SequenceDataScope source(s_sequenceAttachmentData);
+#endif
     if (s_sequenceIndex == 0xFFFFFFFF) {
         if (array.m_offset > size || array.m_offset + sizeof(M2Attachment) * array.m_count > size) {
             return 0;
@@ -1538,6 +2009,10 @@ CM2Shared::CM2Shared(CM2Cache* cache) {
     this->m_vertexPool = nullptr;
     this->m_vertexBuf = nullptr;
     this->m_effects = nullptr;
+    // Custom: SplitSkinSectionsToBoneBudget state
+    this->m_maxBones = 256;
+    this->m_splitSkinBuffer = nullptr;
+    this->m_splitBoneCombos = nullptr;
     this->m_skinSections = nullptr;
     this->m_instances = 0;
     this->m_maxInstances = 0;
@@ -1566,8 +2041,27 @@ int32_t M2Init(uint8_t* base, uint32_t size, M2Data& data) {
 // VERIFY: 8000b812 manual
 // OFFSET: 0x0083C6E0
 int32_t CM2Shared::FinishLoadingLowPrioritySequence(uint32_t sequenceIndex, uint8_t* buffer, uint32_t size) {
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    Retail::AnimationLayout layout;
+    const bool retail = Retail::IsCdnPath(this->m_fileName);
+    if (retail) {
+        std::string error;
+        if (!Retail::InspectAnimation(buffer, size, layout, error)) {
+            DebugLog("Invalid Retail sequence chunks: %s (%d): %s", this->m_fileName, sequenceIndex, error.c_str());
+            return 0;
+        }
+    }
+#endif
     s_sequenceIndex = sequenceIndex;
     s_sequenceData = buffer;
+    s_sequenceSize = size;
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    if (retail && layout.chunked) {
+        if (layout.model.present) s_sequenceData = buffer + layout.model.offset;
+        if (layout.bones.present) s_sequenceBoneData = buffer + layout.bones.offset;
+        if (layout.attachments.present) s_sequenceAttachmentData = buffer + layout.attachments.offset;
+    }
+#endif
 
     int32_t result = M2Init(reinterpret_cast<uint8_t*>(this->m_data), this->m_fileSize, *this->m_data);
     M2Sequence* sequence = &this->m_data->m_sequences[sequenceIndex];
@@ -1575,6 +2069,10 @@ int32_t CM2Shared::FinishLoadingLowPrioritySequence(uint32_t sequenceIndex, uint
     s_sequenceIndex = 0xFFFFFFFF;
     s_sequenceData = nullptr;
     s_sequenceSize = 0;
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    s_sequenceBoneData = nullptr;
+    s_sequenceAttachmentData = nullptr;
+#endif
 
     if (!result) {
         DebugLog("Corrupt model sequence data: %s (%d)", this->m_fileName, sequenceIndex);
@@ -1582,6 +2080,7 @@ int32_t CM2Shared::FinishLoadingLowPrioritySequence(uint32_t sequenceIndex, uint
     }
 
     sequence->m_flags = (sequence->m_flags & ~0x30u) | 0x20;
+
 
     return 1;
 }
@@ -1683,6 +2182,7 @@ int32_t CM2Shared::Initialize() {
     }
 
     this->m_skinData = nullptr;
+    this->m_maxBones = maxBones; // Custom: for SplitSkinSectionsToBoneBudget
 
     uint32_t profile = this->GetSkinProfileIndex(maxBones);
 
@@ -1733,6 +2233,7 @@ int32_t CM2Shared::Initialize() {
         }
     }
 
+
     for (uint32_t i = 0; i < this->m_data->m_bones.m_count; i++) {
         if (this->m_data->m_bones[i].m_flags & 0x2F8) {
             this->m_billboardBoneCount++;
@@ -1772,6 +2273,7 @@ int32_t CM2Shared::FinishLoading() {
     this->m_lowPrioritySequenceCapacity = count;
     this->m_flags |= 1;
     this->m_lowPrioritySequenceCount = 0;
+
 
     return 1;
 }
@@ -1864,6 +2366,7 @@ void CM2Shared::CancelAllDeferredSequences() {
 // VERIFY: 7f65a462 manual
 // OFFSET: 0x0083D5B0
 CM2Shared::~CM2Shared() {
+
     this->CancelAllDeferredSequences();
 
     int32_t pending = 0;
@@ -1910,6 +2413,25 @@ CM2Shared::~CM2Shared() {
         }
     }
 
+    // Custom: buffers of SplitSkinSectionsToBoneBudget
+    if (this->m_splitSkinBuffer) {
+#if defined(WOWDECOMP_ARCH_64)
+        OsFreeNear(this->m_splitSkinBuffer);
+#else
+        SMemFree(this->m_splitSkinBuffer, __FILE__, __LINE__, 0);
+#endif
+        this->m_splitSkinBuffer = nullptr;
+    }
+
+    if (this->m_splitBoneCombos) {
+#if defined(WOWDECOMP_ARCH_64)
+        OsFreeNear(this->m_splitBoneCombos);
+#else
+        SMemFree(this->m_splitBoneCombos, __FILE__, __LINE__, 0);
+#endif
+        this->m_splitBoneCombos = nullptr;
+    }
+
     if (this->m_lowPrioritySequenceCapacity) {
         for (uint32_t i = 0; i < this->m_lowPrioritySequenceCount; i++) {
 #if defined(WOWDECOMP_ARCH_64)
@@ -1947,6 +2469,10 @@ CM2Shared::~CM2Shared() {
     if (!pending) {
         SIMD::FreeA16(this->m_data);
     }
+#if defined(WOWDECOMP_RETAIL_ASSETS)
+    // Drop the validation copy when the last native cache using this model lets go.
+    Retail::SourceForPath(this->m_fileName).ReleaseModel(this->m_fileName);
+#endif
 }
 
 // VERIFY: aeff737a manual
