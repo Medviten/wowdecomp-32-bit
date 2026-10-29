@@ -1717,11 +1717,13 @@ bool InitializeGlobal() {
     // Custom: character creation druid form preview (see DruidForms_CharacterCreate.lua)
     CVar* skinColorRaces = CVar::Register("shapeshiftSkinColorRaces", "Races whose shapeshift models follow skin (fur) color, not hair color (retail IDs: Tauren, Pandaren, Highmountain Tauren, Vulpera)", 0, "6,24,25,26,28,35", ShapeshiftSkinColorRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
     ShapeshiftSkinColorRacesCallback(skinColorRaces, nullptr, skinColorRaces->m_stringValue.m_str, nullptr);
-    CVar* creatureSkinRaces = CVar::Register("creatureSkinRaces", "Races whose models use their whole skin texture (creature models made playable) and show no armour textures (Murloc = 41, Slime Giant = 43, Centaur = 49, CoA races 56-63)", 0, "41,43,49,56,57,58,59,60,61,62,63", CreatureSkinRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
+    // Custom: no default races, as this client's race IDs are the server's own (set the list in Config.wtf; the 256-bit
+    // client defaults to its Murloc, Slime Giant, Centaur and CoA race IDs)
+    CVar* creatureSkinRaces = CVar::Register("creatureSkinRaces", "Races whose models use their whole skin texture (creature models made playable) and show no armour textures, e.g. \"41,43\"", 0, "", CreatureSkinRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
     CreatureSkinRacesCallback(creatureSkinRaces, nullptr, creatureSkinRaces->m_stringValue.m_str, nullptr);
-    // Custom: retail models and customization per race (builds with WOWDECOMP_RETAIL_ASSETS; ignored otherwise).
-    // Defaults: Dracthyr (Alliance 52, Horde 70) at their retail IDs.
-    CVar* retailRaces = CVar::Register("retailRaces", "Races drawn with retail models: \"race=retailRaceID\", or race=centaur / race=slimegiant", 0, "52=52,70=70", RetailRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
+    // Custom: retail models and customization per race (builds with WOWDECOMP_RETAIL_ASSETS; ignored otherwise). No
+    // default races, for the same reason (the 256-bit client maps Dracthyr, races 52 and 70, to their retail IDs)
+    CVar* retailRaces = CVar::Register("retailRaces", "Races drawn with retail models: \"race=retailRaceID\", or race=centaur / race=slimegiant", 0, "", RetailRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
     RetailRacesCallback(retailRaces, nullptr, retailRaces->m_stringValue.m_str, nullptr);
     CVar::Register("druidFormPreview", "Show the druid form preview in character creation", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
 
