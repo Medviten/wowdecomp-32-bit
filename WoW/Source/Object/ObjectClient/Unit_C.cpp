@@ -8974,6 +8974,11 @@ void CGUnit_C::UpdateSelectionRadius() {
     }
 }
 
+// OFFSET: 0x008A1420
+bool CGUnit_C::IsTransport() const {
+    return true;
+}
+
 // VERIFY: 9da62ce8 auto
 // OFFSET: 0x0074B810
 int32_t CGUnit_C::AddPassenger(CPassenger* passenger, int32_t a2) {
@@ -22336,7 +22341,7 @@ CM2Model* CGUnit_C::CreateItemModel(uint32_t displayId, uint32_t inventoryType, 
 
     ItemDisplayInfoRec rec;
 
-    if (!g_itemDisplayInfoDB.GetRecordByIndex(displayId, &rec)) {
+    if (!g_itemDisplayInfoDB.GetRecord(displayId, &rec)) {
         return nullptr;
     }
 
