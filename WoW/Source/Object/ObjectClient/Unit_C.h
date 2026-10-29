@@ -588,6 +588,22 @@ class CGUnit_C : public CGObject_C, public CGUnit {
     // (s_alteredFormAura) is up; and the display actually drawn, which uses that in place of the native display.
     int32_t GetCurrentClientNativeDisplayID() const;
     int32_t GetLocalDisplayID() const;
+    // Custom: Cataclysm's altered form transition (CUnitDisplayTransition_C). BeginAlteredFormTransition keeps the old
+    // model (already dressed, with its component) drawn in the unit's place until the new model and its component are
+    // ready (IsAlteredFormTransitionReady; while pending, ShouldRender does not hide the unit for them). Then, for the
+    // change back to the native form when CanPlayAlteredFormTransition, both play ToAltered and, after the old model's
+    // $ALT event, StopAlteredFormTransition removes it and the new form plays ToAlteredPostSwap; otherwise the old
+    // model just goes away, with the altered form poof when `poof`. UpdateAlteredFormTransition drives this each frame.
+    // UpdateDisplayInfoKeepingModel uses it, without anim or poof, for a player's other display changes (e.g. leaving
+    // a shapeshift form), so the unit is not hidden while its new model and component are made.
+    bool CanPlayAlteredFormTransition();
+    void BeginAlteredFormTransition(CM2Model* oldModel, CCharacterComponent* oldComponent, bool animate, bool poof);
+    void UpdateDisplayInfoKeepingModel();
+    bool IsAlteredFormTransitionReady();
+    bool IsAlteredFormTransitionPending() const;
+    void UpdateAlteredFormTransition();
+    void StopAlteredFormTransition(bool swap);
+    static bool HandleAlteredFormTransitionEvent(CGUnit_C* unit, CM2Model* model, uint32_t eventId);
     // Custom: Cataclysm's mount self (Running Wild): mounted on a display that is the unit's own, so no mount model is
     // made and the unit plays the MountSelf anims in place of its own stand/move/jump/fall anims (GetMountSelfAnim)
     bool IsMountSelf() const;
