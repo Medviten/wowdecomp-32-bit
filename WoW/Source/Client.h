@@ -101,6 +101,9 @@ bool LocaleCallback(CVar* var, const char* oldValue, const char* value, void* ar
 // Custom: Cataclysm-style altered forms (alteredFormRaces); 0 when the race has none
 bool AlteredFormRacesCallback(CVar* var, const char* oldValue, const char* value, void* arg);
 uint32_t ClientGetAlteredFormRace(uint32_t race);
+// Custom: the race whose helmet hide bit a race uses (helmetRaces); the race itself when not listed
+bool HelmetRacesCallback(CVar* var, const char* oldValue, const char* value, void* arg);
+uint32_t ClientGetHelmetRace(uint32_t race);
 // Custom: races whose shapeshift models follow skin (fur) color (shapeshiftSkinColorRaces)
 bool ShapeshiftSkinColorRacesCallback(CVar* var, const char* oldValue, const char* value, void* arg);
 bool ClientShapeshiftUsesSkinColor(uint32_t race);

@@ -1710,10 +1710,15 @@ bool InitializeGlobal() {
     CVar::Register("useEnglishAudio", "override the locale and use English audio", 0, "0", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
 
     // Custom: Cataclysm-style altered forms (see ClientGetAlteredFormRace)
-    // Custom: defaults use this setup's race IDs (12 Worgen, 13 Gilnean, kept at Worgen + 1 in the modpaks' config.sql;
-    // the 256-bit client uses the retail IDs 22 and 23)
-    CVar* alteredForms = CVar::Register("alteredFormRaces", "Races with a second form drawn as another race, e.g. \"12=13\" (Worgen = Gilnean)", 0, "12=13", AlteredFormRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
+    // Custom: defaults use this setup's race IDs (12 Worgen, 213 Gilnean, which is only an altered form and so stays out
+    // of the race masks' 1-31; the 256-bit client uses the retail IDs 22 and 23)
+    CVar* alteredForms = CVar::Register("alteredFormRaces", "Races with a second form drawn as another race, e.g. \"12=213\" (Worgen = Gilnean)", 0, "12=213", AlteredFormRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
     AlteredFormRacesCallback(alteredForms, nullptr, alteredForms->m_stringValue.m_str, nullptr);
+
+    // Custom: whose helmet hide bit a race uses (see ClientGetHelmetRace). Defaults: NPC Goblin (169) = Goblin, the other
+    // NPC races F-008 moves keep their stock bit, Gilnean (213) = Human
+    CVar* helmetRaces = CVar::Register("helmetRaces", "Races that hide geosets under helmets like another race, e.g. \"213=1\" (Gilnean = Human). Needed above race 31, which has no hide bit of its own", 0, "169=9,172=12,173=13,174=14,175=15,176=16,177=17,178=18,179=19,180=20,181=21,213=1", HelmetRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
+    HelmetRacesCallback(helmetRaces, nullptr, helmetRaces->m_stringValue.m_str, nullptr);
 
     // Custom: character creation druid form preview (see DruidForms_CharacterCreate.lua)
     CVar* skinColorRaces = CVar::Register("shapeshiftSkinColorRaces", "Races whose shapeshift models follow skin (fur) color, not hair color (Tauren, Vulpera, Alliance and Horde Pandaren)", 0, "6,18,19,20", ShapeshiftSkinColorRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);

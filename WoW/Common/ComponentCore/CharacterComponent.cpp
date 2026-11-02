@@ -3950,8 +3950,10 @@ void CCharacterComponent::AddHelm(int32_t itemVisual) {
         return;
     }
 
-    // Custom: a retail race uses its helmet donor's bit (RetailRace.cpp)
-    uint32_t raceMask = 1 << RetailRaceHelmetRace(this->m_data.m_preferences.m_raceID);
+    // Custom: a retail race uses its helmet donor's bit (RetailRace.cpp), and helmetRaces can pick another race's. The
+    // masks only have bits 0-31: shifting by a higher race ID would wrap around onto an unrelated race's bit
+    uint32_t helmetRace = ClientGetHelmetRace(RetailRaceHelmetRace(this->m_data.m_preferences.m_raceID));
+    uint32_t raceMask = helmetRace < 32 ? 1u << helmetRace : 0;
 
     if (raceMask & visRec->m_hideGeoset[0]) {
         this->m_data.m_geosets[0] = 1;

@@ -640,9 +640,11 @@ bool LocaleCallback(CVar* var, const char* oldValue, const char* value, void* ar
 // altered race with the same customization choices (in game when its display is the altered race's own model, and
 // in the barber shop and character creation previews).
 static uint8_t s_alteredFormRace[256];
+static uint8_t s_helmetRace[256];
 
-bool AlteredFormRacesCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
-    memset(s_alteredFormRace, 0, sizeof(s_alteredFormRace));
+// Custom: fills a table from "race=otherRace" pairs
+static void ParseRacePairs(const char* value, uint8_t (&table)[256]) {
+    memset(table, 0, sizeof(table));
 
     const char* cursor = value ? value : "";
 
@@ -675,15 +677,33 @@ bool AlteredFormRacesCallback(CVar* var, const char* oldValue, const char* value
         cursor = end;
 
         if (race > 0 && race < 256 && altered > 0 && altered < 256 && race != altered) {
-            s_alteredFormRace[race] = static_cast<uint8_t>(altered);
+            table[race] = static_cast<uint8_t>(altered);
         }
     }
+}
+
+bool AlteredFormRacesCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    ParseRacePairs(value, s_alteredFormRace);
 
     return true;
 }
 
 uint32_t ClientGetAlteredFormRace(uint32_t race) {
     return race < sizeof(s_alteredFormRace) ? s_alteredFormRace[race] : 0;
+}
+
+// Custom: HelmetGeosetVisData's hide masks have one bit per race ID, so only IDs below 32 have a bit of their own.
+// helmetRaces lists "race=copiedRace" pairs choosing whose bit a race uses instead, for the NPC races F-008 moved above
+// the playable range and for not-playable altered forms. A race above 31 that isn't listed has no bit: its helmets
+// hide nothing.
+bool HelmetRacesCallback(CVar* var, const char* oldValue, const char* value, void* arg) {
+    ParseRacePairs(value, s_helmetRace);
+
+    return true;
+}
+
+uint32_t ClientGetHelmetRace(uint32_t race) {
+    return race < sizeof(s_helmetRace) && s_helmetRace[race] ? s_helmetRace[race] : race;
 }
 
 // Custom: retailRaces lists the races drawn with retail models and customization (Kalibro's retail race layer, builds
