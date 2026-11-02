@@ -1721,7 +1721,7 @@ bool InitializeGlobal() {
     HelmetRacesCallback(helmetRaces, nullptr, helmetRaces->m_stringValue.m_str, nullptr);
 
     // Custom: character creation druid form preview (see DruidForms_CharacterCreate.lua)
-    CVar* skinColorRaces = CVar::Register("shapeshiftSkinColorRaces", "Races whose shapeshift models follow skin (fur) color, not hair color (Tauren, Vulpera, Alliance and Horde Pandaren)", 0, "6,18,19,20", ShapeshiftSkinColorRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
+    CVar* skinColorRaces = CVar::Register("shapeshiftSkinColorRaces", "Races whose shapeshift models follow skin (fur) color, not hair color (Tauren, Vulpera, Alliance and Horde Pandaren)", 0, "6,21,13,14", ShapeshiftSkinColorRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
     ShapeshiftSkinColorRacesCallback(skinColorRaces, nullptr, skinColorRaces->m_stringValue.m_str, nullptr);
     // Custom: no default races, as this client's race IDs are the server's own (set the list in Config.wtf; the 256-bit
     // client defaults to its Murloc, Slime Giant, Centaur and CoA race IDs)

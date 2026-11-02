@@ -768,7 +768,7 @@ uint32_t ClientGetRetailRace(uint32_t race) {
 }
 
 // Custom: shapeshiftSkinColorRaces lists the races whose shapeshift form models follow skin (fur) color rather than
-// hair color in player_shapeshift_model (default "6,18,19,20": Tauren, Vulpera, Alliance and Horde Pandaren), matching
+// hair color in player_shapeshift_model (default "6,21,13,14": Tauren, Vulpera, Alliance and Horde Pandaren), matching
 // the 32-bit server's Shapeshift.SkinColorRaces default
 static bool s_shapeshiftSkinColorRace[256];
 
