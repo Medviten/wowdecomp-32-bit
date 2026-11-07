@@ -1729,7 +1729,7 @@ bool InitializeGlobal() {
     CreatureSkinRacesCallback(creatureSkinRaces, nullptr, creatureSkinRaces->m_stringValue.m_str, nullptr);
     // Custom: retail models and customization per race (builds with WOWDECOMP_RETAIL_ASSETS; ignored otherwise). No
     // default races, for the same reason (the 256-bit client maps Dracthyr, races 52 and 70, to their retail IDs)
-    CVar* retailRaces = CVar::Register("retailRaces", "Races drawn with retail models: \"race=retailRaceID\", or race=centaur / race=slimegiant", 0, "", RetailRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
+    CVar* retailRaces = CVar::Register("retailRaces", "Races drawn with retail models: \"race=retailRaceID\", race=forever:foreverRaceID, or race=centaur / race=slimegiant", 0, "", RetailRacesCallback, CATEGORY_DEFAULT, false, nullptr, false);
     RetailRacesCallback(retailRaces, nullptr, retailRaces->m_stringValue.m_str, nullptr);
     CVar::Register("druidFormPreview", "Show the druid form preview in character creation", 0, "1", nullptr, CATEGORY_DEFAULT, false, nullptr, false);
     // Custom: the macro icon picker also lists every SpellIcon.dbc icon (see CGUIMacros::LoadIcons); 0 is stock
